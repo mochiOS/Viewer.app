@@ -1,0 +1,38 @@
+format = 1
+
+[package]
+provenance = "built-in"
+id = "org.mochios.viewer"
+name = "Viewer"
+version = "0.1.0"
+revision = 1
+vendor = "mochiOS"
+kind = "application"
+architecture = "x86_64"
+abi = "mochios-1"
+
+[application]
+entry = "entry.elf"
+description = "View images and documents"
+icon = "appicon.png"
+resources = ["appicon.png"]
+document_roles = ["view"]
+document_content_types = [
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+    "image/bmp",
+    "image/svg+xml",
+]
+document_extensions = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg"]
+
+[[binary]]
+path = "/system/applications/Viewer.app/entry.elf"
+kind = "application"
+requires = [
+    "ipc.client",
+    "ipc.server",
+    "window.create",
+    "fs.read.user",
+]
