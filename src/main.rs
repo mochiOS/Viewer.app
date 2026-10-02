@@ -48,10 +48,8 @@ impl ViewerModel {
             fit_to_window: State::new(true),
             alert: Alert::new(),
         };
-        if let Some(path) = document_argument()
-            && let Ok(document) = load_document(&path)
-        {
-            model.document.set(Some(document));
+        if let Some(path) = document_argument() {
+            model.open_or_alert(path);
         }
         model
     }
@@ -437,5 +435,13 @@ mod tests {
         let path = Path::new("/tmp/image.png");
         assert!(is_supported_path(path));
         assert_eq!(extension(path).as_deref(), Some("png"));
+    }
+
+    #[test]
+    fn bundled_png_can_be_loaded() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("appicon.png");
+        let document = load_document(&path).expect("bundled app icon should decode");
+        assert!(document.width > 0.0);
+        assert!(document.height > 0.0);
     }
 }
