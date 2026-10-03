@@ -306,7 +306,7 @@ impl App for ViewerApp {
     fn handle_platform_message_with_handles(
         &mut self,
         message: &[u8],
-        handles: &[PlatformFileHandle],
+        handles: &mut [PlatformFileHandle],
     ) -> bool {
         match document::decode_open_message(message, handles) {
             Ok(Some(opened)) => {
