@@ -67,6 +67,7 @@ impl ViewerModel {
             .read_to_end_limited(MAX_DOCUMENT_BYTES as usize)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         let document = decode_document_bytes(&path, &bytes)?;
+        eprintln!("Viewer.app: opened delegated document {}", path.display());
         self.set_document(document);
         Ok(())
     }
