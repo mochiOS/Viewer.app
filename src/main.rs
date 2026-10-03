@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use appcore::prelude::*;
@@ -56,14 +57,35 @@ impl ViewerModel {
 
     fn open(&self, path: &Path) -> Result<(), String> {
         let document = load_document(path)?;
+        self.set_document(document);
+        Ok(())
+    }
+
+    fn open_delegated(&self, opened: document::OpenedDocument) -> Result<(), String> {
+        let path = opened.path.clone();
+        let bytes = opened
+            .read_to_end_limited(MAX_DOCUMENT_BYTES as usize)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let document = decode_document_bytes(&path, &bytes)?;
+        self.set_document(document);
+        Ok(())
+    }
+
+    fn set_document(&self, document: ViewerDocument) {
         self.document.set(Some(document));
         self.zoom.set(1.0);
         self.fit_to_window.set(true);
-        Ok(())
     }
 
     fn open_or_alert(&self, path: PathBuf) {
         if let Err(message) = self.open(&path) {
+            self.alert
+                .present_error("The document could not be opened.", message);
+        }
+    }
+
+    fn open_delegated_or_alert(&self, opened: document::OpenedDocument) {
+        if let Err(message) = self.open_delegated(opened) {
             self.alert
                 .present_error("The document could not be opened.", message);
         }
@@ -279,6 +301,26 @@ impl App for ViewerApp {
                 ),
         )
     }
+
+    fn handle_platform_message_with_handles(
+        &mut self,
+        message: &[u8],
+        handles: &[PlatformFileHandle],
+    ) -> bool {
+        match document::decode_open_message(message, handles) {
+            Ok(Some(opened)) => {
+                self.model.open_delegated_or_alert(opened);
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                self.model
+                    .alert
+                    .present_error("The document could not be opened.", error.to_string());
+                true
+            }
+        }
+    }
 }
 
 fn preview_view(
@@ -367,17 +409,31 @@ fn is_supported_path(path: &Path) -> bool {
 }
 
 fn load_document(path: &Path) -> Result<ViewerDocument, String> {
-    let metadata = fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let file = fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    load_document_file(file, path)
+}
+
+fn load_document_file(mut file: fs::File, path: &Path) -> Result<ViewerDocument, String> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     if !metadata.is_file() {
         return Err(String::from("The selected item is not a file."));
     }
     if metadata.len() > MAX_DOCUMENT_BYTES {
         return Err(String::from("The selected document is larger than 256 MB."));
     }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    decode_document_bytes(path, &bytes)
+}
+
+fn decode_document_bytes(path: &Path, bytes: &[u8]) -> Result<ViewerDocument, String> {
     let extension =
         extension(path).ok_or_else(|| String::from("This file type is not supported."))?;
     if extension == "svg" {
-        let svg = SvgData::from_path(path).map_err(|error| error.to_string())?;
+        let svg = SvgData::decode(&bytes).map_err(|error| error.to_string())?;
         return Ok(ViewerDocument {
             path: path.to_path_buf(),
             width: svg.width(),
@@ -389,7 +445,7 @@ fn load_document(path: &Path) -> Result<ViewerDocument, String> {
     if !is_supported_path(path) {
         return Err(String::from("This file type is not supported."));
     }
-    let image = ImageData::from_path(path).map_err(|error| error.to_string())?;
+    let image = ImageData::decode(&bytes).map_err(|error| error.to_string())?;
     let (width, height) = image.dimensions();
     let format = match extension.as_str() {
         "png" => "PNG",
