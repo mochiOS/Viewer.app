@@ -1,10 +1,14 @@
+mod canvas;
+
+use std::cell::RefCell;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use appcore::prelude::*;
 
-const MIN_ZOOM: f32 = 0.1;
+const MIN_ZOOM: f32 = 0.01;
 const MAX_ZOOM: f32 = 8.0;
 const MAX_DOCUMENT_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -21,9 +25,41 @@ struct ViewerDocument {
     width: f32,
     height: f32,
     format: &'static str,
+    rotated: Rc<RefCell<Option<(u8, PreviewData)>>>,
 }
 
 impl ViewerDocument {
+    fn dimensions(&self, turns: u8) -> Size {
+        if turns % 2 == 0 {
+            Size::new(self.width, self.height)
+        } else {
+            Size::new(self.height, self.width)
+        }
+    }
+    fn preview(&self, turns: u8) -> Result<PreviewData, String> {
+        let turns = turns % 4;
+        if turns == 0 {
+            return Ok(self.preview.clone());
+        }
+        if let Some((cached, preview)) = &*self.rotated.borrow()
+            && *cached == turns
+        {
+            return Ok(preview.clone());
+        }
+        let result = match &self.preview {
+            PreviewData::Raster(image) => PreviewData::Raster(
+                image
+                    .rotated_quarter_turns(turns)
+                    .map_err(|e| e.to_string())?,
+            ),
+            PreviewData::Vector(svg) => PreviewData::Vector(
+                svg.rotated_quarter_turns(turns)
+                    .map_err(|e| e.to_string())?,
+            ),
+        };
+        *self.rotated.borrow_mut() = Some((turns, result.clone()));
+        Ok(result)
+    }
     fn display_name(&self) -> String {
         self.path
             .file_name()
@@ -39,20 +75,31 @@ struct ViewerModel {
     zoom: State<f32>,
     fit_to_window: State<bool>,
     alert: Alert,
+    rotation: State<u8>,
+    siblings: State<Vec<PathBuf>>,
+    canvas: Rc<RefCell<canvas::CanvasInteraction>>,
+    navigation_error: Rc<RefCell<Option<String>>>,
 }
 
 impl ViewerModel {
     fn new() -> Self {
-        let model = Self {
-            document: State::new(None),
-            zoom: State::new(1.0),
-            fit_to_window: State::new(true),
-            alert: Alert::new(),
-        };
+        let model = Self::empty();
         if let Some(path) = document_argument() {
             model.open_or_alert(path);
         }
         model
+    }
+    fn empty() -> Self {
+        Self {
+            document: State::new(None),
+            zoom: State::new(1.0),
+            fit_to_window: State::new(true),
+            alert: Alert::new(),
+            rotation: State::new(0),
+            siblings: State::new(Vec::new()),
+            canvas: Rc::new(RefCell::new(canvas::CanvasInteraction::default())),
+            navigation_error: Rc::new(RefCell::new(None)),
+        }
     }
 
     fn open(&self, path: &Path) -> Result<(), String> {
@@ -73,6 +120,14 @@ impl ViewerModel {
     }
 
     fn set_document(&self, document: ViewerDocument) {
+        let (siblings, error) = match sibling_images(&document.path) {
+            Ok(paths) => (paths, None),
+            Err(error) => (vec![document.path.clone()], Some(error)),
+        };
+        self.siblings.set(siblings);
+        *self.navigation_error.borrow_mut() = error;
+        self.rotation.set(0);
+        self.canvas.borrow_mut().reset();
         self.document.set(Some(document));
         self.zoom.set(1.0);
         self.fit_to_window.set(true);
@@ -92,23 +147,76 @@ impl ViewerModel {
         }
     }
 
-    fn adjust_zoom(&self, factor: f32) {
-        let zoom = if self.fit_to_window.get() {
-            1.0
-        } else {
-            self.zoom.get()
-        };
-        self.fit_to_window.set(false);
-        self.zoom.set((zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM));
+    fn current_zoom(&self, document: &ViewerDocument) -> f32 {
+        let viewport = self.canvas.borrow().viewport;
+        zoom_for_viewport(
+            document.dimensions(self.rotation.get()),
+            viewport,
+            self.fit_to_window.get(),
+            self.zoom.get(),
+        )
     }
-
+    fn adjust_zoom(&self, factor: f32) {
+        self.zoom_at(factor, Point::new(0.0, 0.0));
+    }
+    fn zoom_at(&self, factor: f32, anchor: Point) {
+        let Some(document) = self.document.get() else {
+            return;
+        };
+        if !factor.is_finite() || factor <= 0.0 {
+            return;
+        }
+        let previous = self.current_zoom(&document);
+        let next = (previous * factor).clamp(MIN_ZOOM.min(previous), MAX_ZOOM);
+        {
+            let mut canvas = self.canvas.borrow_mut();
+            canvas.drag = None;
+            canvas.pan = Point::new(
+                (canvas.pan.x - anchor.x) * next / previous + anchor.x,
+                (canvas.pan.y - anchor.y) * next / previous + anchor.y,
+            );
+        }
+        self.fit_to_window.set(false);
+        self.zoom.set(next);
+    }
+    fn show_open(&self, panel: &OpenPanel) {
+        let directory = self
+            .document
+            .get()
+            .and_then(|document| document.path.parent().map(Path::to_path_buf));
+        panel.show_at(directory.as_deref());
+    }
     fn actual_size(&self) {
+        self.canvas.borrow_mut().reset();
         self.fit_to_window.set(false);
         self.zoom.set(1.0);
     }
-
     fn fit(&self) {
+        self.canvas.borrow_mut().reset();
         self.fit_to_window.set(true);
+    }
+    fn rotate(&self, clockwise: bool) {
+        let Some(document) = self.document.get() else {
+            return;
+        };
+        let turns = (self.rotation.get() + if clockwise { 1 } else { 3 }) % 4;
+        if let Err(error) = document.preview(turns) {
+            self.alert
+                .present_error("The image could not be rotated.", error);
+            return;
+        }
+        self.canvas.borrow_mut().reset();
+        self.rotation.set(turns);
+    }
+    fn neighbor(&self, offset: isize) -> Option<PathBuf> {
+        let document = self.document.get()?;
+        self.siblings
+            .with(|items| neighbor_path(items, &document.path, offset))
+    }
+    fn navigate(&self, offset: isize) {
+        if let Some(path) = self.neighbor(offset) {
+            self.open_or_alert(path);
+        }
     }
 }
 
@@ -158,26 +266,51 @@ impl App for ViewerApp {
             .resizable(true)
     }
 
-    fn body(&self, context: &ViewContext) -> Self::Body {
+    fn body(&self, _context: &ViewContext) -> Self::Body {
         let document = self.model.document.get();
         let has_document = document.is_some();
         let panel_for_open = self.open_panel.clone();
         let menu_panel = self.open_panel.clone();
+        let toolbar_open_model = self.model.clone();
+        let menu_open_model = self.model.clone();
         let fit_model = self.model.clone();
         let actual_model = self.model.clone();
         let zoom_out_model = self.model.clone();
         let zoom_in_model = self.model.clone();
 
-        let toolbar = Toolbar::new(
-            HStack::new()
+        let previous_model = self.model.clone();
+        let next_model = self.model.clone();
+        let rotate_model = self.model.clone();
+        let toolbar = Toolbar::new(canvas::ViewerToolbar {
+            leading: HStack::new()
                 .alignment(StackAlignment::Center)
                 .gap(StackGap::Small)
                 .child(
                     Button::new("Open…")
                         .size(ButtonSize::Small)
-                        .on_click(move || panel_for_open.show()),
+                        .on_click(move || toolbar_open_model.show_open(&panel_for_open)),
                 )
-                .child(Spacer::new())
+                .child(
+                    IconButton::new(SymbolName::ChevronLeft)
+                        .enabled(self.model.neighbor(-1).is_some())
+                        .accessibility_label("Previous Image")
+                        .on_click(move || previous_model.navigate(-1)),
+                )
+                .child(
+                    IconButton::new(SymbolName::ChevronRight)
+                        .enabled(self.model.neighbor(1).is_some())
+                        .accessibility_label("Next Image")
+                        .on_click(move || next_model.navigate(1)),
+                )
+                .child(
+                    Button::new("Rotate")
+                        .size(ButtonSize::Small)
+                        .enabled(has_document)
+                        .on_click(move || rotate_model.rotate(true)),
+                ),
+            trailing: HStack::new()
+                .alignment(StackAlignment::Center)
+                .gap(StackGap::Small)
                 .child(
                     IconButton::new(SymbolName::SearchMinus)
                         .enabled(has_document)
@@ -202,39 +335,13 @@ impl App for ViewerApp {
                         .on_click(move || zoom_in_model.adjust_zoom(1.25))
                         .accessibility_label("Zoom In"),
                 ),
-        );
-
-        let content: Box<dyn View> = if let Some(document) = document.as_ref() {
-            preview_view(document, &self.model, context)
+        });
+        let content: Box<dyn View> = if has_document {
+            Box::new(canvas::ImageCanvas(self.model.clone()))
         } else {
             empty_view(self.open_panel.clone())
         };
-
-        let status = document.as_ref().map_or_else(
-            || String::from("Open an image to begin"),
-            |document| {
-                let zoom = effective_zoom(document, &self.model, context);
-                format!(
-                    "{}   {} × {}   {:.0}%",
-                    document.format,
-                    document.width.round() as u32,
-                    document.height.round() as u32,
-                    zoom * 100.0
-                )
-            },
-        );
-        let status_bar = Toolbar::bottom(
-            HStack::new()
-                .alignment(StackAlignment::Center)
-                .child(Text::metadata(status))
-                .child(Spacer::new())
-                .child(Text::metadata(
-                    document
-                        .as_ref()
-                        .map(ViewerDocument::display_name)
-                        .unwrap_or_default(),
-                )),
-        );
+        let status_bar = Toolbar::bottom(canvas::ViewerStatus(self.model.clone()));
 
         let drop_model = self.model.clone();
         let main_content = FileDropTarget::new(
@@ -261,8 +368,10 @@ impl App for ViewerApp {
                 .menu(
                     ApplicationMenu::new("File")
                         .item(
-                            ApplicationMenuItem::new("Open…", move || menu_panel.show())
-                                .shortcut(MenuShortcut::command('o', "Ctrl+O")),
+                            ApplicationMenuItem::new("Open…", move || {
+                                menu_open_model.show_open(&menu_panel)
+                            })
+                            .shortcut(MenuShortcut::command('o', "Ctrl+O")),
                         )
                         .separator()
                         .item(
@@ -281,6 +390,7 @@ impl App for ViewerApp {
                                 let model = self.model.clone();
                                 move || model.adjust_zoom(1.25)
                             })
+                            .enabled(has_document)
                             .shortcut(MenuShortcut::command('+', "Ctrl++")),
                         )
                         .item(
@@ -288,17 +398,58 @@ impl App for ViewerApp {
                                 let model = self.model.clone();
                                 move || model.adjust_zoom(0.8)
                             })
+                            .enabled(has_document)
                             .shortcut(MenuShortcut::command('-', "Ctrl+-")),
                         )
                         .separator()
-                        .item(ApplicationMenuItem::new("Actual Size", {
-                            let model = self.model.clone();
-                            move || model.actual_size()
-                        }))
-                        .item(ApplicationMenuItem::new("Fit to Window", {
-                            let model = self.model.clone();
-                            move || model.fit()
-                        })),
+                        .item(
+                            ApplicationMenuItem::new("Actual Size", {
+                                let model = self.model.clone();
+                                move || model.actual_size()
+                            })
+                            .enabled(has_document)
+                            .shortcut(MenuShortcut::command('1', "Ctrl+1")),
+                        )
+                        .item(
+                            ApplicationMenuItem::new("Fit to Window", {
+                                let model = self.model.clone();
+                                move || model.fit()
+                            })
+                            .enabled(has_document)
+                            .shortcut(MenuShortcut::command('0', "Ctrl+0")),
+                        )
+                        .separator()
+                        .item(
+                            ApplicationMenuItem::new("Rotate Right", {
+                                let model = self.model.clone();
+                                move || model.rotate(true)
+                            })
+                            .enabled(has_document)
+                            .shortcut(MenuShortcut::command('r', "Ctrl+R")),
+                        )
+                        .item(
+                            ApplicationMenuItem::new("Rotate Left", {
+                                let model = self.model.clone();
+                                move || model.rotate(false)
+                            })
+                            .enabled(has_document)
+                            .shortcut(MenuShortcut::command('l', "Ctrl+L")),
+                        )
+                        .separator()
+                        .item(
+                            ApplicationMenuItem::new("Previous Image", {
+                                let model = self.model.clone();
+                                move || model.navigate(-1)
+                            })
+                            .enabled(self.model.neighbor(-1).is_some()),
+                        )
+                        .item(
+                            ApplicationMenuItem::new("Next Image", {
+                                let model = self.model.clone();
+                                move || model.navigate(1)
+                            })
+                            .enabled(self.model.neighbor(1).is_some()),
+                        ),
                 ),
         )
     }
@@ -324,31 +475,6 @@ impl App for ViewerApp {
     }
 }
 
-fn preview_view(
-    document: &ViewerDocument,
-    model: &ViewerModel,
-    context: &ViewContext,
-) -> Box<dyn View> {
-    let zoom = effective_zoom(document, model, context);
-    let width = (document.width * zoom).max(1.0);
-    let height = (document.height * zoom).max(1.0);
-    let label = document.display_name();
-    let preview: Box<dyn View> = match &document.preview {
-        PreviewData::Raster(image) => Box::new(
-            Image::new(image.clone())
-                .content_mode(ImageContentMode::Fit)
-                .accessibility_label(label),
-        ),
-        PreviewData::Vector(svg) => Box::new(
-            Svg::new(svg.clone())
-                .content_mode(SvgContentMode::Fit)
-                .original_colors()
-                .accessibility_label(label),
-        ),
-    };
-    Box::new(Surface::pane().content(Scroll::both(preview.layout().frame(width, height))))
-}
-
 fn empty_view(open_panel: OpenPanel) -> Box<dyn View> {
     Box::new(
         Surface::pane().content(
@@ -371,20 +497,50 @@ fn empty_view(open_panel: OpenPanel) -> Box<dyn View> {
     )
 }
 
-fn effective_zoom(document: &ViewerDocument, model: &ViewerModel, context: &ViewContext) -> f32 {
-    if !model.fit_to_window.get() {
-        return model.zoom.get().clamp(MIN_ZOOM, MAX_ZOOM);
+fn zoom_for_viewport(image: Size, viewport: Size, fit: bool, zoom: f32) -> f32 {
+    if !fit {
+        return zoom.clamp(0.000001, MAX_ZOOM);
     }
-    let layout = Theme::current().layout;
-    let available_width = (context.size().width - Theme::current().spacing.huge).max(1.0);
-    let available_height = (context.size().height
-        - layout.top_bar_height
-        - layout.bottom_bar_height
-        - Theme::current().spacing.huge)
-        .max(1.0);
-    (available_width / document.width)
-        .min(available_height / document.height)
-        .clamp(MIN_ZOOM, MAX_ZOOM)
+    let inset = Theme::current().spacing.large * 2.0;
+    ((viewport.width - inset).max(1.0) / image.width)
+        .min((viewport.height - inset).max(1.0) / image.height)
+        .min(MAX_ZOOM)
+        .max(0.000001)
+}
+fn neighbor_path(items: &[PathBuf], current: &Path, offset: isize) -> Option<PathBuf> {
+    let index = items
+        .iter()
+        .position(|path| path.file_name() == current.file_name())?;
+    let next = index.checked_add_signed(offset)?;
+    items.get(next).cloned()
+}
+fn sibling_images(path: &Path) -> Result<Vec<PathBuf>, String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut paths: Vec<_> = fs::read_dir(parent)
+        .map_err(|error| format!("Folder navigation unavailable: {error}"))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            (is_supported_path(&path) && path.is_file()).then_some(path)
+        })
+        .collect();
+    if !paths
+        .iter()
+        .any(|item| item.file_name() == path.file_name())
+    {
+        paths.push(path.to_path_buf());
+    }
+    paths.sort_by(|a, b| {
+        a.file_name()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .cmp(&b.file_name().unwrap_or_default().to_ascii_lowercase())
+            .then(a.cmp(b))
+    });
+    Ok(paths)
 }
 
 fn document_argument() -> Option<PathBuf> {
@@ -414,7 +570,7 @@ fn load_document(path: &Path) -> Result<ViewerDocument, String> {
     load_document_file(file, path)
 }
 
-fn load_document_file(mut file: fs::File, path: &Path) -> Result<ViewerDocument, String> {
+fn load_document_file(file: fs::File, path: &Path) -> Result<ViewerDocument, String> {
     let metadata = file
         .metadata()
         .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -425,12 +581,16 @@ fn load_document_file(mut file: fs::File, path: &Path) -> Result<ViewerDocument,
         return Err(String::from("The selected document is larger than 256 MB."));
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.read_to_end(&mut bytes)
+    file.take(MAX_DOCUMENT_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     decode_document_bytes(path, &bytes)
 }
 
 fn decode_document_bytes(path: &Path, bytes: &[u8]) -> Result<ViewerDocument, String> {
+    if bytes.len() as u64 > MAX_DOCUMENT_BYTES {
+        return Err("The selected document is larger than 256 MB.".into());
+    }
     let extension =
         extension(path).ok_or_else(|| String::from("This file type is not supported."))?;
     if extension == "svg" {
@@ -441,6 +601,7 @@ fn decode_document_bytes(path: &Path, bytes: &[u8]) -> Result<ViewerDocument, St
             height: svg.height(),
             preview: PreviewData::Vector(svg),
             format: "SVG",
+            rotated: Rc::new(RefCell::new(None)),
         });
     }
     if !is_supported_path(path) {
@@ -462,6 +623,7 @@ fn decode_document_bytes(path: &Path, bytes: &[u8]) -> Result<ViewerDocument, St
         width: width as f32,
         height: height as f32,
         format,
+        rotated: Rc::new(RefCell::new(None)),
     })
 }
 
@@ -500,5 +662,69 @@ mod tests {
         let document = load_document(&path).expect("bundled app icon should decode");
         assert!(document.width > 0.0);
         assert!(document.height > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod viewer_workflow_tests {
+    use super::*;
+    fn folder() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let path = std::env::temp_dir().join(format!(
+            "mochios-viewer-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+    #[test]
+    fn folder_navigation_opens_real_images_and_stops_at_the_endpoints() {
+        let directory = folder();
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="red"/></svg>"#;
+        for name in ["a.svg", "b.SVG", "c.svg"] {
+            fs::write(directory.join(name), svg).unwrap();
+        }
+        fs::write(directory.join("notes.txt"), b"ignored").unwrap();
+        fs::create_dir(directory.join("directory.png")).unwrap();
+        let model = ViewerModel::empty();
+        model.open(&directory.join("a.svg")).unwrap();
+        assert!(model.neighbor(-1).is_none());
+        assert_eq!(model.siblings.get().len(), 3);
+        model.navigate(1);
+        assert_eq!(model.document.get().unwrap().display_name(), "b.SVG");
+        model.rotate(true);
+        assert_eq!(model.rotation.get(), 1);
+        let document = model.document.get().unwrap();
+        assert_eq!(
+            document.dimensions(model.rotation.get()),
+            Size::new(10.0, 20.0)
+        );
+        assert!(matches!(
+            document.preview(1).unwrap(),
+            PreviewData::Vector(_)
+        ));
+        model.navigate(1);
+        assert_eq!(model.rotation.get(), 0);
+        assert!(model.fit_to_window.get());
+        assert_eq!(model.document.get().unwrap().display_name(), "c.svg");
+        assert!(model.neighbor(1).is_none());
+        model.open(&directory.join("notes.txt")).unwrap_err();
+        assert_eq!(model.document.get().unwrap().display_name(), "c.svg");
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn rotating_never_modifies_the_source_file_and_keeps_vector_resolution() {
+        let directory = folder();
+        let path = directory.join("image.svg");
+        let source = br#"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="100"><rect width="300" height="100" fill="blue"/></svg>"#;
+        fs::write(&path, source).unwrap();
+        let document = load_document(&path).unwrap();
+        for turns in 1..=4 {
+            document.preview(turns).unwrap();
+        }
+        assert_eq!(fs::read(&path).unwrap(), source);
+        assert!(document.rotated.borrow().is_some());
+        fs::remove_dir_all(directory).unwrap();
     }
 }
