@@ -1,5 +1,6 @@
 mod canvas;
 mod thumbnail;
+mod ui;
 
 use std::cell::RefCell;
 use std::fs;
@@ -80,6 +81,7 @@ struct ViewerModel {
     siblings: State<Vec<PathBuf>>,
     canvas: Rc<RefCell<canvas::CanvasInteraction>>,
     navigation_error: Rc<RefCell<Option<String>>>,
+    document_revision: State<u64>,
 }
 
 impl ViewerModel {
@@ -100,6 +102,7 @@ impl ViewerModel {
             siblings: State::new(Vec::new()),
             canvas: Rc::new(RefCell::new(canvas::CanvasInteraction::default())),
             navigation_error: Rc::new(RefCell::new(None)),
+            document_revision: State::new(0),
         }
     }
 
@@ -121,6 +124,8 @@ impl ViewerModel {
     }
 
     fn set_document(&self, document: ViewerDocument) {
+        self.document_revision
+            .set(self.document_revision.get().wrapping_add(1));
         let (siblings, error) = match sibling_images(&document.path) {
             Ok(paths) => (paths, None),
             Err(error) => (vec![document.path.clone()], Some(error)),
@@ -224,6 +229,7 @@ impl ViewerModel {
 struct ViewerApp {
     model: ViewerModel,
     open_panel: OpenPanel,
+    toolbar: ActionToolbarState<ui::Action>,
 }
 
 impl App for ViewerApp {
@@ -251,7 +257,11 @@ impl App for ViewerApp {
             },
             move |path| panel_model.open(path),
         );
-        Self { model, open_panel }
+        Self {
+            model,
+            open_panel,
+            toolbar: ActionToolbarState::new(),
+        }
     }
 
     fn window(&self) -> WindowOptions {
@@ -270,79 +280,19 @@ impl App for ViewerApp {
     fn body(&self, _context: &ViewContext) -> Self::Body {
         let document = self.model.document.get();
         let has_document = document.is_some();
-        let panel_for_open = self.open_panel.clone();
         let menu_panel = self.open_panel.clone();
-        let toolbar_open_model = self.model.clone();
         let menu_open_model = self.model.clone();
-        let fit_model = self.model.clone();
-        let actual_model = self.model.clone();
-        let zoom_out_model = self.model.clone();
-        let zoom_in_model = self.model.clone();
-
-        let previous_model = self.model.clone();
-        let next_model = self.model.clone();
-        let rotate_model = self.model.clone();
-        let toolbar = Toolbar::new(canvas::ViewerToolbar {
-            leading: HStack::new()
-                .alignment(StackAlignment::Center)
-                .gap(StackGap::Small)
-                .child(
-                    Button::new("Open…")
-                        .size(ButtonSize::Small)
-                        .on_click(move || toolbar_open_model.show_open(&panel_for_open)),
-                )
-                .child(
-                    IconButton::new(SymbolName::ChevronLeft)
-                        .enabled(self.model.neighbor(-1).is_some())
-                        .accessibility_label("Previous Image")
-                        .on_click(move || previous_model.navigate(-1)),
-                )
-                .child(
-                    IconButton::new(SymbolName::ChevronRight)
-                        .enabled(self.model.neighbor(1).is_some())
-                        .accessibility_label("Next Image")
-                        .on_click(move || next_model.navigate(1)),
-                )
-                .child(
-                    Button::new("Rotate")
-                        .size(ButtonSize::Small)
-                        .enabled(has_document)
-                        .on_click(move || rotate_model.rotate(true)),
-                ),
-            trailing: HStack::new()
-                .alignment(StackAlignment::Center)
-                .gap(StackGap::Small)
-                .child(
-                    IconButton::new(SymbolName::SearchMinus)
-                        .enabled(has_document)
-                        .on_click(move || zoom_out_model.adjust_zoom(0.8))
-                        .accessibility_label("Zoom Out"),
-                )
-                .child(
-                    Button::new("Actual Size")
-                        .size(ButtonSize::Small)
-                        .enabled(has_document)
-                        .on_click(move || actual_model.actual_size()),
-                )
-                .child(
-                    Button::new("Fit")
-                        .size(ButtonSize::Small)
-                        .enabled(has_document)
-                        .on_click(move || fit_model.fit()),
-                )
-                .child(
-                    IconButton::new(SymbolName::SearchPlus)
-                        .enabled(has_document)
-                        .on_click(move || zoom_in_model.adjust_zoom(1.25))
-                        .accessibility_label("Zoom In"),
-                ),
-        });
+        let toolbar = Toolbar::new(ui::toolbar(
+            &self.model,
+            &self.open_panel,
+            self.toolbar.clone(),
+        ));
         let content: Box<dyn View> = if has_document {
             Box::new(canvas::ImageCanvas(self.model.clone()))
         } else {
             empty_view(self.open_panel.clone())
         };
-        let status_bar = Toolbar::bottom(canvas::ViewerStatus(self.model.clone()));
+        let status_bar = Toolbar::bottom(ui::DocumentStatus(self.model.clone()));
 
         let drop_model = self.model.clone();
         let main_content = FileDropTarget::new(
@@ -352,7 +302,7 @@ impl App for ViewerApp {
                     .gap(StackGap::None)
                     .child(toolbar)
                     .child(Divider::new())
-                    .child(content.layout().flex_grow(1.0))
+                    .child(Surface::pane().content(content).layout().flex_grow(1.0))
                     .child(Divider::new())
                     .child(status_bar),
             ),
@@ -478,23 +428,21 @@ impl App for ViewerApp {
 
 fn empty_view(open_panel: OpenPanel) -> Box<dyn View> {
     Box::new(
-        Surface::pane().content(
-            VStack::new()
-                .alignment(StackAlignment::Center)
-                .distribution(StackDistribution::Center)
-                .gap(StackGap::Medium)
-                .child(Icon::new(SymbolName::File).size(48.0))
-                .child(Text::styled("Open a document", TextRole::TitleMedium))
-                .child(
-                    Text::body("Drop an image here, or choose one from Files.")
-                        .tone(TextTone::Secondary),
-                )
-                .child(
-                    Button::new("Open…")
-                        .style(ButtonStyle::Primary)
-                        .on_click(move || open_panel.show()),
-                ),
-        ),
+        VStack::new()
+            .alignment(StackAlignment::Center)
+            .distribution(StackDistribution::Center)
+            .gap(StackGap::Medium)
+            .child(Icon::new(SymbolName::File))
+            .child(Text::styled("Open a document", TextRole::TitleMedium))
+            .child(
+                Text::body("Drop an image here, or choose one from Files.")
+                    .tone(TextTone::Secondary),
+            )
+            .child(
+                Button::new("Open…")
+                    .style(ButtonStyle::Primary)
+                    .on_click(move || open_panel.show()),
+            ),
     )
 }
 

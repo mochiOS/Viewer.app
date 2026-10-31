@@ -46,7 +46,6 @@ impl View for ImageCanvas {
         constraints.maximum
     }
     fn paint(&self, bounds: Rect, context: &mut PaintContext<'_>) {
-        Surface::pane().paint(bounds, context);
         self.0.canvas.borrow_mut().viewport = bounds.size;
         let Some(document) = self.0.document.get() else {
             return;
@@ -156,115 +155,6 @@ impl View for ImageCanvas {
             }
             _ => EventResult::Ignored,
         }
-    }
-}
-
-pub(super) struct ViewerToolbar {
-    pub leading: HStack,
-    pub trailing: HStack,
-}
-impl ViewerToolbar {
-    fn frames(bounds: Rect) -> (Rect, Rect) {
-        if bounds.size.width < 640.0 {
-            (
-                Rect::new(bounds.origin.x, bounds.origin.y, bounds.size.width, 28.0),
-                Rect::new(
-                    bounds.origin.x,
-                    bounds.origin.y + 36.0,
-                    bounds.size.width,
-                    28.0,
-                ),
-            )
-        } else {
-            (
-                Rect::new(bounds.origin.x, bounds.origin.y, 300.0, 28.0),
-                Rect::new(
-                    bounds.origin.x + bounds.size.width - 300.0,
-                    bounds.origin.y,
-                    300.0,
-                    28.0,
-                ),
-            )
-        }
-    }
-}
-impl View for ViewerToolbar {
-    fn measure(&self, c: Constraints, _: &mut MeasureContext<'_>) -> Size {
-        c.constrain(Size::new(
-            c.maximum.width,
-            if c.maximum.width < 640.0 { 64.0 } else { 28.0 },
-        ))
-    }
-    fn paint(&self, bounds: Rect, context: &mut PaintContext<'_>) {
-        let (left, right) = Self::frames(bounds);
-        self.leading.paint(left, context);
-        self.trailing.paint(right, context);
-    }
-    fn handle_event(
-        &self,
-        bounds: Rect,
-        event: &ViewEvent,
-        context: &mut EventContext<'_>,
-    ) -> EventResult {
-        let (left, right) = Self::frames(bounds);
-        self.leading
-            .handle_event(left, event, context)
-            .merge(self.trailing.handle_event(right, event, context))
-    }
-}
-
-pub(super) struct ViewerStatus(pub ViewerModel);
-impl View for ViewerStatus {
-    fn paint(&self, bounds: Rect, context: &mut PaintContext<'_>) {
-        let Some(document) = self.0.document.get() else {
-            Text::metadata("Open an image to begin").paint(bounds, context);
-            return;
-        };
-        let turns = self.0.rotation.get();
-        let size = document.dimensions(turns);
-        let zoom = self.0.current_zoom(&document);
-        let position = self.0.siblings.with(|items| {
-            items
-                .iter()
-                .position(|path| path.file_name() == document.path.file_name())
-                .map(|index| format!("{} / {}", index + 1, items.len()))
-                .unwrap_or_default()
-        });
-        let status = format!(
-            "{} · {} × {} · {:.0}%{}",
-            document.format,
-            size.width as u32,
-            size.height as u32,
-            zoom * 100.0,
-            if turns == 0 {
-                String::new()
-            } else {
-                format!(" · {}°", u16::from(turns) * 90)
-            }
-        );
-        let detail = if self.0.navigation_error.borrow().is_some() {
-            "Folder navigation unavailable".into()
-        } else {
-            format!("{} · {position}", document.display_name())
-        };
-        Text::metadata(status).paint(
-            Rect::new(
-                bounds.origin.x,
-                bounds.origin.y,
-                bounds.size.width * 0.55,
-                bounds.size.height,
-            ),
-            context,
-        );
-        Text::metadata(detail).alignment(TextAlignment::End).paint(
-            Rect::new(
-                bounds.origin.x + bounds.size.width * 0.55,
-                bounds.origin.y,
-                bounds.size.width * 0.45,
-                bounds.size.height,
-            ),
-            context,
-        );
     }
 }
 

@@ -33,5 +33,8 @@ Keyboard commands are listed in the native menus:
 - Ctrl+R / Ctrl+L: Rotate Right / Left
 - Left / Right: Previous / Next Image
 
-The toolbar wraps to two rows in narrow windows. Rotation uses a text button
-until a matching VK Symbols asset is available.
+The interface uses ViewKit surfaces, the standard ActionToolbar, buttons and
+text layout. Narrow windows place secondary actions in the native overflow
+menu instead of adding a second toolbar row. Status labels use standard
+single-line truncation and report Fit against the current canvas size.
+Rotation uses a text button until a matching VK Symbols asset is available.
