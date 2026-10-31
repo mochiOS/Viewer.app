@@ -1,4 +1,5 @@
 mod canvas;
+mod thumbnail;
 
 use std::cell::RefCell;
 use std::fs;
@@ -634,6 +635,14 @@ fn extension(path: &Path) -> Option<String> {
 }
 
 fn main() -> Result<(), appcore::ViewKitError> {
+    match appcore::document::thumbnail::serve(thumbnail::generate) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Thumbnail generation failed: {error}");
+            std::process::exit(1);
+        }
+    }
     appcore::run::<ViewerApp>()
 }
 

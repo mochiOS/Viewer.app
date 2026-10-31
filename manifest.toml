@@ -16,6 +16,7 @@ entry = "entry.elf"
 description = "View images and documents"
 icon = "appicon.png"
 resources = ["appicon.png"]
+thumbnail = true
 document_roles = ["view"]
 document_content_types = [
     "image/png",
