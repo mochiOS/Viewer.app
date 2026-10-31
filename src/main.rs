@@ -635,6 +635,22 @@ fn extension(path: &Path) -> Option<String> {
 }
 
 fn main() -> Result<(), appcore::ViewKitError> {
+    match appcore::document::preview::serve(|request| {
+        thumbnail::generate(appcore::document::thumbnail::ThumbnailRequest {
+            bytes: request.bytes,
+            extension: request.extension,
+            content_type: request.content_type,
+            max_edge: request.max_edge,
+        })
+        .map(appcore::document::preview::PreviewContent::Image)
+    }) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Preview failed: {error}");
+            std::process::exit(1);
+        }
+    }
     match appcore::document::thumbnail::serve(thumbnail::generate) {
         Ok(true) => return Ok(()),
         Ok(false) => {}
