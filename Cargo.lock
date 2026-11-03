@@ -1045,6 +1045,7 @@ dependencies = [
  "mnu-abi",
  "mochi-user-syscall",
  "mochios-capability-protocol",
+ "mochios-package-manifest",
  "mochios-workspace-protocol",
 ]
 
@@ -1098,6 +1099,13 @@ dependencies = [
 [[package]]
 name = "mochios-net-device-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "mochios-package-manifest"
+version = "0.1.0"
+dependencies = [
+ "toml",
+]
 
 [[package]]
 name = "mochios-posix-client"
@@ -3278,6 +3286,10 @@ name = "mnu"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "mochios-mdriver-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "mochi-user-runtime"
 version = "0.1.0"
 
@@ -3290,10 +3302,6 @@ name = "mochios-linux-portal-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "mochios-net-device-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "mochios-signature-protocol"
 version = "0.1.0"
 
@@ -3303,10 +3311,6 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "mochios-user-database"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-user-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
