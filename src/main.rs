@@ -119,17 +119,28 @@ impl ViewerModel {
             .map_err(|error| format!("{}: {error}", path.display()))?;
         let document = decode_document_bytes(&path, &bytes)?;
         eprintln!("Viewer.app: opened delegated document {}", path.display());
-        self.set_document(document);
+        self.set_document_navigation(document, false);
         Ok(())
     }
 
     fn set_document(&self, document: ViewerDocument) {
+        self.set_document_navigation(document, true);
+    }
+
+    fn open_selected(&self, file: appcore::DocumentFile) -> Result<(), String> {
+        let bytes = file.read_limited(MAX_DOCUMENT_BYTES as usize).map_err(|e| e.to_string())?;
+        let document = decode_document_bytes(file.path(), &bytes)?;
+        self.set_document_navigation(document, false);
+        Ok(())
+    }
+
+    fn set_document_navigation(&self, document: ViewerDocument, browse_siblings: bool) {
         self.document_revision
             .set(self.document_revision.get().wrapping_add(1));
-        let (siblings, error) = match sibling_images(&document.path) {
+        let (siblings, error) = if !browse_siblings { (vec![document.path.clone()], None) } else { match sibling_images(&document.path) {
             Ok(paths) => (paths, None),
             Err(error) => (vec![document.path.clone()], Some(error)),
-        };
+        } };
         self.siblings.set(siblings);
         *self.navigation_error.borrow_mut() = error;
         self.rotation.set(0);
@@ -249,13 +260,13 @@ impl App for ViewerApp {
         .into_iter()
         .filter_map(|content_type| ContentType::parse(content_type).ok())
         .collect();
-        let open_panel = OpenPanel::new(
+        let open_panel = OpenPanel::with_file(
             OpenPanelOptions {
                 title: String::from("Open in Viewer"),
                 allowed_content_types,
                 ..OpenPanelOptions::default()
             },
-            move |path| panel_model.open(path),
+            move |file| panel_model.open_selected(file),
         );
         Self {
             model,
